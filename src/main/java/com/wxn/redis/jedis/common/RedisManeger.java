@@ -3,8 +3,11 @@ package com.wxn.redis.jedis.common;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPubSub;
+import redis.clients.jedis.Transaction;
 
-import javax.annotation.Resource;
+import java.util.List;
+import java.util.UUID;
 
 /**
  * Redis管理类
@@ -43,7 +46,7 @@ public class RedisManeger {
         return StaticHolder.jedisPool;
     }
 
-    /**************  redis 操作  ****************/
+    /**************  redis operations start  ****************/
 
     /**
      * setString
@@ -53,18 +56,145 @@ public class RedisManeger {
      * @return
      */
     public static boolean set(String key, String defaultValue) {
-        Jedis jedis = null;
-        boolean result = false;
-        try {
-            jedis = getJedisPool().getResource();
+        boolean result;
+        try (Jedis jedis = getJedisPool().getResource()) {
             jedis.set(key, defaultValue);
             result = true;
-        } finally {
-            if (jedis != null) jedis.close();
         }
         return result;
     }
 
+    public static String get(String key) {
+        String result = null;
+        if (key == null || "".equals(key)) {
+            return result;
+        }
+        try (Jedis jedis = getJedisPool().getResource()) {
+            result = jedis.get(key);
+        }
+        return result;
+    }
+
+    /**
+     * 1: the timeout was set. 0: the timeout was not set
+     *
+     * @param key
+     * @param second
+     * @return
+     */
+    public static long expiry(String key, int second) {
+        long result = 0;
+        if (null == key || "".equals(key)) {
+            return result;
+        }
+        try (Jedis jedis = getJedisPool().getResource()) {
+            result = jedis.expire(key, second);
+        }
+        return result;
+    }
+
+    /**
+     * 1: the timeout was set. 0: the timeout was not set
+     *
+     * @param key
+     * @param unixTime Date.getTime()
+     * @return
+     */
+    public static long expiryAt(String key, long unixTime) {
+        long result = 0;
+        if (null == key || "".equals(key)) {
+            return 0;
+        }
+        try (Jedis jedis = getJedisPool().getResource()) {
+            result = jedis.expireAt(key, unixTime);
+        }
+        return result;
+    }
+
+    public static void psubscribe(JedisPubSub listener, String... patterns) {
+        try (Jedis jedis = getJedisPool().getResource()) {
+            jedis.psubscribe(listener, patterns);
+        }
+    }
+
+    private static final String KEY_PREFIX = "lock@";
+
+    /**
+     * 分布式锁
+     *
+     * @param lockName
+     * @param waitTimeoutInMS
+     * @param lockTimeout
+     * @return
+     */
+    public static String lock(String lockName, long waitTimeoutInMS, int lockTimeout) {
+        if (lockName == null || "".equals(lockName)) {
+            return null;
+        }
+        String lockKey = KEY_PREFIX + lockName;
+        String token = null;
+        String identifier = UUID.randomUUID().toString();
+        // 获取锁等待截止时间
+        long endTime = System.currentTimeMillis() + waitTimeoutInMS;
+        try (Jedis jedis = getJedisPool().getResource()) {
+            while (System.currentTimeMillis() < endTime) {
+                if (jedis.setnx(lockKey, identifier) == 1) {
+                    jedis.expire(lockKey, lockTimeout);
+                    token = identifier;
+                }
+
+                // 防止锁不失效
+                if (jedis.ttl(lockKey) == -1) {
+                    jedis.expire(lockKey, lockTimeout);
+                }
+
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("获取锁失败：" + e.getMessage());
+        }
+        return token;
+    }
+
+    /**
+     * 释放锁
+     *
+     * @param lockName
+     * @param token
+     * @return
+     */
+    public static boolean releaseLock(String lockName, String token) {
+        boolean isRelease = false;
+        if (lockName == null || "".equals(lockName) || token == null || "".equals(token)) {
+            return isRelease;
+        }
+        String lockKey = KEY_PREFIX + lockName;
+        try (Jedis jedis = getJedisPool().getResource()) {
+            while (true) {
+                jedis.watch(lockKey);
+                if (token.equals(jedis.get(lockKey))) {
+                    Transaction tx = jedis.multi();
+                    tx.del(lockKey);
+                    List<Object> ret = tx.exec();
+                    if (ret == null) {
+                        continue;
+                    }
+                    isRelease = true;
+                }
+                jedis.unwatch();
+                break;
+            }
+        } catch (Exception e) {
+            System.out.println("释放锁失败");
+        }
+
+        return isRelease;
+    }
+    /**************  redis operations end  ****************/
 
     /**
      * Jedis出异常的时候，回收jedis对象资源
