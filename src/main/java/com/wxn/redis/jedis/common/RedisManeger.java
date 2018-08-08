@@ -138,10 +138,15 @@ public class RedisManeger {
         long endTime = System.currentTimeMillis() + waitTimeoutInMS;
         try (Jedis jedis = getJedisPool().getResource()) {
             while (System.currentTimeMillis() < endTime) {
-                if (jedis.setnx(lockKey, identifier) == 1) {
-                    jedis.expire(lockKey, lockTimeout);
-                    token = identifier;
-                }
+
+                // 保持原子性操作
+                jedis.set(lockKey, identifier,"NX","EX",10);
+
+                // 不能保证原子性操作
+//                if (jedis.setnx(lockKey, identifier) == 1) {
+//                    jedis.expire(lockKey, lockTimeout);
+//                    token = identifier;
+//                }
 
                 // 防止锁不失效
                 if (jedis.ttl(lockKey) == -1) {
